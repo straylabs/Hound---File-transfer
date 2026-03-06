@@ -1,0 +1,29 @@
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/
+
+# IDE
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+
+# Android
+*.apk
+*.aab
+*.dex
+*.dm
+
+# Build outputs
+app/release/
+
+# Local config
+local.properties
+
+# macOS
+.DS_Store
+
+# Claude Code
+.claude/

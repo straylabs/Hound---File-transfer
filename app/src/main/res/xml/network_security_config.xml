@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    LAN File Server — network security config.
+
+    Android 9+ blocks all plain HTTP (cleartext) by default.
+    This app communicates exclusively over the local network (LAN) using HTTP,
+    so cleartext must be permitted.
+
+    NOTE: Android's domain-config does NOT support IP subnet ranges — you cannot
+    whitelist "192.168.0.0/16" with a wildcard. Since the peer's LAN IP is dynamic
+    (could be 192.168.x.x, 10.x.x.x, 172.16.x.x, etc.) we enable cleartext globally.
+    Traffic never leaves the local network.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
