@@ -31,6 +31,8 @@ import androidx.compose.ui.unit.sp
 import androidx.core.content.ContextCompat
 import com.straylabs.hound.server.LocalHttpServer
 import com.straylabs.hound.server.ServerForegroundService
+import com.straylabs.hound.ui.screens.ChatScreen
+import com.straylabs.hound.ui.screens.ChatSession
 import com.straylabs.hound.ui.screens.ClientScreen
 import com.straylabs.hound.ui.screens.FolderPickerDialog
 import com.straylabs.hound.ui.screens.ServerScreen
@@ -44,6 +46,7 @@ import java.net.NetworkInterface
 private const val KEY_SERVER_FOLDER = "server_folder_path"
 private const val KEY_CLIENT_USERNAME = "client_username"
 private const val KEY_CLIENT_PASSWORD = "client_password"
+private const val KEY_CHAT_DISPLAY_NAME = "chat_display_name"
 private const val NOTIFICATION_PERMISSION_CODE = 100
 
 class MainActivity : ComponentActivity() {
@@ -145,6 +148,8 @@ class MainActivity : ComponentActivity() {
                 var serverPort by remember { mutableStateOf(LocalHttpServer.DEFAULT_PORT) }
                 var serverIp by remember { mutableStateOf<String?>(null) }
                 var selectedTab by remember { mutableStateOf(0) }
+                var chatDisplayName by remember { mutableStateOf(prefs.getString(KEY_CHAT_DISPLAY_NAME, "") ?: "") }
+                var clientConnectedUrl by remember { mutableStateOf<String?>(null) }
 
                 LaunchedEffect(Unit) { serverIp = getLocalIpAddress() }
 
@@ -255,7 +260,7 @@ class MainActivity : ComponentActivity() {
                                     ClientScreen(
                                         downloadFolder = downloadDir,
                                         savedCredentials = savedClientCredentials,
-                                        onCredentialsSaved = { 
+                                        onCredentialsSaved = {
                                             clientCredentials.value = it
                                             saveClientCredentials(it)
                                         },
@@ -263,7 +268,37 @@ class MainActivity : ComponentActivity() {
                                             requestFolderPicker(isServer = false)
                                         },
                                         transferHistory = transferHistory,
-                                        notificationHelper = notificationHelper
+                                        notificationHelper = notificationHelper,
+                                        onConnectedUrlChanged = { clientConnectedUrl = it }
+                                    )
+                                }
+                                Box(
+                                    modifier = if (selectedTab == 2) Modifier.fillMaxSize()
+                                    else Modifier.requiredSize(0.dp)
+                                ) {
+                                    val chatSessions = buildList {
+                                        if (serverRunning && serverIp != null) {
+                                            add(ChatSession(
+                                                label = "This device (server)",
+                                                url = "http://$serverIp:$serverPort",
+                                                isLocal = true
+                                            ))
+                                        }
+                                        clientConnectedUrl?.let { url ->
+                                            add(ChatSession(
+                                                label = "Connected server",
+                                                url = url,
+                                                isLocal = false
+                                            ))
+                                        }
+                                    }
+                                    ChatScreen(
+                                        sessions = chatSessions,
+                                        savedDisplayName = chatDisplayName,
+                                        onDisplayNameSaved = { name ->
+                                            chatDisplayName = name
+                                            prefs.edit().putString(KEY_CHAT_DISPLAY_NAME, name).apply()
+                                        }
                                     )
                                 }
                             }
@@ -362,7 +397,7 @@ private fun AppTabRow(selectedTab: Int, onTabSelected: (Int) -> Unit) {
                 .background(MaterialTheme.colorScheme.surfaceVariant)
                 .padding(3.dp)
         ) {
-            listOf("Server", "Client").forEachIndexed { index, label ->
+            listOf("Server", "Client", "Chat").forEachIndexed { index, label ->
                 Box(
                     modifier = Modifier
                         .clip(RoundedCornerShape(50))

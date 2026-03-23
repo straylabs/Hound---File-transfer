@@ -56,7 +56,8 @@ fun ClientScreen(
     onCredentialsSaved: (Pair<String, String>?) -> Unit = {},
     onSelectDownloadFolder: () -> Unit,
     transferHistory: TransferHistory? = null,
-    notificationHelper: NotificationHelper? = null
+    notificationHelper: NotificationHelper? = null,
+    onConnectedUrlChanged: (String?) -> Unit = {}
 ) {
     val context = LocalContext.current
     val httpClient = remember { HttpClientManager(context, transferHistory) }
@@ -83,6 +84,10 @@ fun ClientScreen(
 
     LaunchedEffect(savedCredentials) {
         httpClient.credentials = savedCredentials
+    }
+
+    LaunchedEffect(connectedUrl) {
+        onConnectedUrlChanged(connectedUrl)
     }
 
     fun loadFiles(baseUrl: String, path: String) {

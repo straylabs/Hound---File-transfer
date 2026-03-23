@@ -36,6 +36,11 @@ class LocalHttpServer(
     // @Volatile ensures visibility across NanoHTTPD's worker threads
     @Volatile var credentials: Pair<String, String>? = null
 
+    // ---- Chat store ----
+    private data class ChatMsg(val id: Long, val sender: String, val text: String, val ts: Long, val type: String = "chat")
+    private val chatMessages = ArrayList<ChatMsg>()
+    private val chatLock = Any()
+
     fun setRootDirectory(directory: File?) { this.rootDirectory = directory }
     fun getRootDirectory(): File? = rootDirectory
 
@@ -59,6 +64,7 @@ class LocalHttpServer(
             uri.startsWith("/upload") && (session.method == Method.PUT || session.method == Method.POST) -> handleUpload(session)
             uri.startsWith("/delete") && session.method == Method.DELETE -> handleDelete(session)
             uri == "/.app-icon" -> serveAppIcon()
+            uri.startsWith("/chat") -> handleChatRequest(session)
             else -> serveStaticContent(session)
         }
     }
@@ -509,6 +515,7 @@ a{text-decoration:none;color:inherit}
 <nav class="navbar">
   <div class="nav-logo"><img src="/.app-icon" alt="Hound" width="22" height="22" style="object-fit:contain;display:block"></div>
   <span class="nav-brand">Hound</span>
+  <a href="/chat" style="margin-left:auto;background:#E0F2F1;border:1px solid #80CBC4;color:#00695C;padding:6px 14px;border-radius:8px;font-size:12px;font-weight:600;display:flex;align-items:center;gap:5px" title="Open LAN Chat">&#128172; Chat</a>
 </nav>
 
 <div class="breadbar">
@@ -896,6 +903,251 @@ function doDelete(path) {
         return if (file.exists() && file.delete())
             newFixedLengthResponse(Response.Status.OK, "application/json", """{"success":true}""")
         else jsonErrorResponse(Response.Status.NOT_FOUND, "File not found")
+    }
+
+    // ---- Chat ----
+
+    private fun handleChatRequest(session: IHTTPSession): Response {
+        return when {
+            (session.uri == "/chat" || session.uri == "/chat/") && session.method == Method.GET -> serveChatPage(session)
+            session.uri == "/chat/messages" && session.method == Method.GET -> serveChatMessages(session)
+            session.uri == "/chat/send" && session.method == Method.POST -> handleChatSend(session)
+            else -> errorHtml(Response.Status.NOT_FOUND, "404 – Not Found")
+        }
+    }
+
+    private fun serveChatPage(session: IHTTPSession): Response {
+        val html = """<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Hound &middot; Chat</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;background:#F5F5F5;color:#212121;height:100vh;display:flex;flex-direction:column}
+a{text-decoration:none;color:inherit}
+.navbar{background:#fff;border-bottom:1px solid #E0E0E0;padding:0 20px;height:56px;display:flex;align-items:center;gap:12px;flex-shrink:0}
+.nav-logo{width:32px;height:32px;background:#00897B;border-radius:8px;display:flex;align-items:center;justify-content:center;color:#fff;font-size:18px;flex-shrink:0}
+.nav-brand{font-size:17px;font-weight:700;color:#212121}
+.nav-back{margin-left:auto;background:#F5F5F5;border:1px solid #E0E0E0;color:#424242;padding:6px 14px;border-radius:8px;font-size:12px;display:flex;align-items:center;gap:5px;cursor:pointer}
+.nav-back:hover{background:#E0E0E0}
+/* Chat layout */
+.chat-outer{flex:1;display:flex;flex-direction:column;align-items:center;overflow:hidden}
+.chat-wrap{width:100%;max-width:720px;flex:1;display:flex;flex-direction:column;overflow:hidden}
+.msgs{flex:1;overflow-y:auto;padding:16px 16px 8px;display:flex;flex-direction:column;gap:8px}
+/* Bubbles */
+.brow{display:flex}.brow.mine{justify-content:flex-end}
+.bcol{display:flex;flex-direction:column;max-width:70%}
+.bcol.mine{align-items:flex-end}
+.sender-lbl{font-size:11px;font-weight:600;color:#00897B;margin-bottom:3px;padding-left:6px}
+.bubble{padding:10px 14px;border-radius:16px;font-size:14px;line-height:1.45;word-break:break-word}
+.bubble.mine{background:#00897B;color:#fff;border-top-right-radius:4px}
+.bubble.other{background:#fff;color:#212121;border:1px solid #E0E0E0;border-top-left-radius:4px}
+/* Input bar */
+.input-bar{border-top:1px solid #E0E0E0;background:#fff;padding:10px 16px;display:flex;gap:8px;align-items:flex-end;flex-shrink:0;width:100%;max-width:720px;margin:0 auto}
+.msg-inp{flex:1;border:1px solid #E0E0E0;border-radius:24px;padding:10px 16px;font-size:14px;font-family:inherit;resize:none;outline:none;background:#F5F5F5;max-height:120px;overflow-y:auto;transition:.15s}
+.msg-inp:focus{border-color:#00897B;background:#fff}
+.send-btn{background:#00897B;color:#fff;border:none;border-radius:50%;width:42px;height:42px;cursor:pointer;display:flex;align-items:center;justify-content:center;flex-shrink:0;transition:.15s}
+.send-btn:hover{background:#00796B}
+.send-btn:disabled{background:#BDBDBD;cursor:default}
+/* Name overlay */
+#overlay{position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:100}
+.name-card{background:#fff;border-radius:16px;padding:32px 28px;width:100%;max-width:360px;display:flex;flex-direction:column;gap:16px;align-items:center;box-shadow:0 8px 32px rgba(0,0,0,.18)}
+.name-card h2{font-size:20px;font-weight:700}
+.name-card p{font-size:13px;color:#757575;text-align:center}
+.name-inp{width:100%;border:1px solid #E0E0E0;border-radius:10px;padding:12px 14px;font-size:15px;font-family:inherit;outline:none;transition:.15s}
+.name-inp:focus{border-color:#00897B}
+.join-btn{width:100%;background:#00897B;color:#fff;border:none;border-radius:10px;padding:13px;font-size:15px;font-weight:600;cursor:pointer;transition:.15s}
+.join-btn:hover{background:#00796B}
+.join-btn:disabled{background:#BDBDBD;cursor:default}
+.empty-hint{color:#9E9E9E;font-size:13px;text-align:center;margin:auto;padding:24px}
+.sys-row{display:flex;justify-content:center;padding:2px 0}
+.sys-pill{background:#F5F5F5;border:1px solid #E0E0E0;color:#9E9E9E;font-size:11px;padding:3px 12px;border-radius:20px;font-style:italic}
+</style>
+</head>
+<body>
+<nav class="navbar">
+  <a href="/" class="nav-logo"><img src="/.app-icon" alt="" width="20" height="20" style="object-fit:contain;display:block"></a>
+  <span class="nav-brand">Hound</span>
+  <a href="/" class="nav-back">&#8592; Files</a>
+</nav>
+
+<div id="overlay">
+  <div class="name-card">
+    <h2>&#128172; LAN Chat</h2>
+    <p>Chat with everyone on the same network in real-time.</p>
+    <input class="name-inp" id="nameInp" placeholder="Your name" maxlength="32" autofocus
+      oninput="document.getElementById('joinBtn').disabled=!this.value.trim()"
+      onkeypress="if(event.key==='Enter')joinChat()">
+    <button class="join-btn" id="joinBtn" disabled onclick="joinChat()">Join Chat</button>
+  </div>
+</div>
+
+<div class="chat-outer">
+  <div class="chat-wrap">
+    <div class="msgs" id="msgs">
+      <div class="empty-hint" id="emptyHint">No messages yet. Say hello!</div>
+    </div>
+  </div>
+  <div class="input-bar">
+    <textarea class="msg-inp" id="msgInp" placeholder="Message…" rows="1"
+      onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMsg()}"
+      oninput="autoGrow(this)"></textarea>
+    <button class="send-btn" id="sendBtn" disabled onclick="sendMsg()" title="Send">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M2 21l21-9L2 3v7l15 2-15 2v7z"/></svg>
+    </button>
+  </div>
+</div>
+
+<script>
+var myName = localStorage.getItem('hound_chat_name') || '';
+var lastTs = 0;
+var pollTimer;
+
+if (myName) {
+  document.getElementById('overlay').style.display = 'none';
+  startChat();
+}
+
+function joinChat() {
+  var n = document.getElementById('nameInp').value.trim();
+  if (!n) return;
+  myName = n;
+  localStorage.setItem('hound_chat_name', n);
+  document.getElementById('overlay').style.display = 'none';
+  startChat();
+}
+
+function startChat() {
+  document.getElementById('msgInp').addEventListener('input', function() {
+    document.getElementById('sendBtn').disabled = !this.value.trim();
+  });
+  sendSystem(myName + ' joined the chat');
+  window.addEventListener('beforeunload', function() {
+    var params = new URLSearchParams({sender:'',text:myName+' left the chat',type:'system'});
+    navigator.sendBeacon('/chat/send', params);
+  });
+  poll();
+}
+
+function sendSystem(text) {
+  var params = new URLSearchParams({sender:'',text:text,type:'system'});
+  fetch('/chat/send', {method:'POST', body:params}).catch(function(){});
+}
+
+function poll() {
+  fetch('/chat/messages?since=' + lastTs)
+    .then(function(r) { return r.json(); })
+    .then(function(data) {
+      if (data.messages && data.messages.length > 0) {
+        data.messages.forEach(appendMsg);
+        lastTs = data.messages[data.messages.length - 1].ts;
+      }
+    })
+    .catch(function() {})
+    .finally(function() { pollTimer = setTimeout(poll, 1500); });
+}
+
+function appendMsg(m) {
+  var empty = document.getElementById('emptyHint');
+  if (empty) empty.remove();
+
+  var msgs = document.getElementById('msgs');
+
+  if (m.type === 'system') {
+    var srow = document.createElement('div');
+    srow.className = 'sys-row';
+    var pill = document.createElement('span');
+    pill.className = 'sys-pill';
+    pill.textContent = m.text;
+    srow.appendChild(pill);
+    msgs.appendChild(srow);
+    msgs.scrollTop = msgs.scrollHeight;
+    return;
+  }
+
+  var mine = m.sender === myName;
+  var row = document.createElement('div');
+  row.className = 'brow' + (mine ? ' mine' : '');
+  var col = document.createElement('div');
+  col.className = 'bcol' + (mine ? ' mine' : '');
+
+  if (!mine) {
+    var lbl = document.createElement('div');
+    lbl.className = 'sender-lbl';
+    lbl.textContent = m.sender;
+    col.appendChild(lbl);
+  }
+
+  var bub = document.createElement('div');
+  bub.className = 'bubble ' + (mine ? 'mine' : 'other');
+  bub.textContent = m.text;
+  col.appendChild(bub);
+  row.appendChild(col);
+
+  msgs.appendChild(row);
+  msgs.scrollTop = msgs.scrollHeight;
+}
+
+function sendMsg() {
+  var inp = document.getElementById('msgInp');
+  var text = inp.value.trim();
+  if (!text || !myName) return;
+  inp.value = '';
+  inp.style.height = '';
+  document.getElementById('sendBtn').disabled = true;
+
+  var params = new URLSearchParams();
+  params.append('sender', myName);
+  params.append('text', text);
+  fetch('/chat/send', { method: 'POST', body: params })
+    .catch(function() {});
+}
+
+function autoGrow(el) {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, 120) + 'px';
+}
+</script>
+</body></html>"""
+        return newFixedLengthResponse(Response.Status.OK, MIME_HTML, html).apply {
+            addHeader("Cache-Control", "no-cache, no-store, must-revalidate")
+        }
+    }
+
+    private fun serveChatMessages(session: IHTTPSession): Response {
+        val since = session.parms["since"]?.toLongOrNull() ?: 0L
+        val msgs = synchronized(chatLock) { chatMessages.filter { it.ts > since } }
+        val json = msgs.joinToString(",") { m ->
+            """{"id":${m.id},"sender":${m.sender.jsonEscape()},"text":${m.text.jsonEscape()},"ts":${m.ts},"type":${m.type.jsonEscape()}}"""
+        }
+        return newFixedLengthResponse(Response.Status.OK, "application/json", """{"messages":[$json]}""").apply {
+            addHeader("Cache-Control", "no-cache, no-store, must-revalidate")
+            addHeader("Access-Control-Allow-Origin", "*")
+        }
+    }
+
+    private fun handleChatSend(session: IHTTPSession): Response {
+        return try {
+            val bodyMap = HashMap<String, String>()
+            session.parseBody(bodyMap)
+            val type = session.parms["type"]?.trim()?.takeIf { it == "system" } ?: "chat"
+            val sender = if (type == "system") "" else (session.parms["sender"]?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?: return jsonErrorResponse(Response.Status.BAD_REQUEST, "Missing sender"))
+            val text = session.parms["text"]?.trim()?.takeIf { it.isNotEmpty() }
+                ?: return jsonErrorResponse(Response.Status.BAD_REQUEST, "Missing text")
+            val now = System.currentTimeMillis()
+            synchronized(chatLock) {
+                chatMessages.add(ChatMsg(id = now, sender = sender, text = text, ts = now, type = type))
+                if (chatMessages.size > 200) chatMessages.removeAt(0)
+            }
+            newFixedLengthResponse(Response.Status.OK, "application/json", """{"id":$now,"ts":$now}""").apply {
+                addHeader("Access-Control-Allow-Origin", "*")
+            }
+        } catch (e: Exception) {
+            jsonErrorResponse(Response.Status.INTERNAL_ERROR, "Error: ${e.message}")
+        }
     }
 
     // ---- Helpers ----
